@@ -6,7 +6,11 @@ use std::{
 };
 
 use bitvec::bitarr;
+#[cfg(not(feature = "alt-deflater"))]
 use libdeflater::{CompressionLvl, Compressor};
+
+#[cfg(feature = "alt-deflater")]
+use flate2::{Compression, write::ZlibEncoder};
 use log::warn;
 use rgb::ComponentSlice;
 use rustc_hash::FxHashMap;
@@ -28,7 +32,7 @@ use self::scan_lines::ScanLines;
 /// Compression level to use for the Brute filter strategy
 const BRUTE_LEVEL: i32 = 1; // 1 is fastest, 2-4 are not useful, 5 is slower but more effective
 /// Number of lines to compress with the Brute filter strategy
-const BRUTE_LINES: usize = 4; // Values over 8 are generally not useful
+const _BRUTE_LINES: usize = 4; // Values over 8 are generally not useful
 
 #[derive(Debug, Clone)]
 pub struct PngImage {
@@ -451,24 +455,49 @@ impl PngImage {
                         let mut best_size = usize::MAX;
                         let line_start = filtered.len();
                         filtered.resize(filtered.len() + line.data.len() + 1, 0);
-                        let mut compressor =
-                            Compressor::new(CompressionLvl::new(BRUTE_LEVEL).unwrap());
-                        let limit = filtered.len().min((line.data.len() + 1) * BRUTE_LINES);
-                        let capacity = compressor.zlib_compress_bound(limit);
-                        let mut dest = vec![0; capacity];
 
-                        for f in try_filters {
-                            f.filter_line(bpp, &mut line_data, &prev_line, &mut f_buf, alpha_bytes);
-                            filtered[line_start..].copy_from_slice(&f_buf);
-                            let size = compressor
-                                .zlib_compress(&filtered[filtered.len() - limit..], &mut dest)
-                                .unwrap_or(usize::MAX);
-                            if size < best_size {
-                                best_size = size;
-                                std::mem::swap(&mut best_line, &mut f_buf);
-                                best_line_raw.clone_from(&line_data);
+                        #[cfg(not(feature = "alt-deflater"))]
+                        {
+                            let mut compressor =
+                                Compressor::new(CompressionLvl::new(BRUTE_LEVEL).unwrap());
+                            let limit = filtered.len().min((line.data.len() + 1) * _BRUTE_LINES);
+                            let capacity = compressor.zlib_compress_bound(limit);
+                            let mut dest = vec![0; capacity];
+
+                            for f in try_filters {
+                                f.filter_line(bpp, &mut line_data, &prev_line, &mut f_buf, alpha_bytes);
+                                filtered[line_start..].copy_from_slice(&f_buf);
+                                let size = compressor
+                                    .zlib_compress(&filtered[filtered.len() - limit..], &mut dest)
+                                    .unwrap_or(usize::MAX);
+                                if size < best_size {
+                                    best_size = size;
+                                    std::mem::swap(&mut best_line, &mut f_buf);
+                                    best_line_raw.clone_from(&line_data);
+                                }
                             }
                         }
+
+                        #[cfg(feature = "alt-deflater")]
+                        {
+                            for f in try_filters {
+                                f.filter_line(bpp, &mut line_data, &prev_line, &mut f_buf, alpha_bytes);
+                                filtered[line_start..].copy_from_slice(&f_buf);
+
+                                let mut encoder = ZlibEncoder::new(Vec::new(), Compression::new(BRUTE_LEVEL as u32));
+
+                                encoder.write_all(&filtered[line_start..]).unwrap();
+                                let compressed_data = encoder.finish().unwrap();
+                                let size = compressed_data.len();
+
+                                if size < best_size {
+                                    best_size = size;
+                                    std::mem::swap(&mut best_line, &mut f_buf);
+                                    best_line_raw.clone_from(&line_data);
+                                }
+                            }
+                        }
+
                         filtered.resize(line_start, 0);
                     }
                     _ => unreachable!(),
